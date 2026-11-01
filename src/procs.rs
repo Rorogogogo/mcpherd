@@ -314,7 +314,7 @@ mod tests {
                 "node /n/node_modules/.bin/context7-mcp",
                 70,
             ),
-            proc(103, 100, "zsh", "/bin/zsh -c mcphub doctor", 3),
+            proc(103, 100, "zsh", "/bin/zsh -c mcpherd doctor", 3),
             proc(104, 100, "magic", "node /x/mcp-server.js", 40),
             // Desktop app: only wrapped children count, and wrapped CLI sessions are their own session.
             proc(200, 1, "Claude", "/Applications/Claude.app", 500),
