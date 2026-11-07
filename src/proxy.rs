@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -124,15 +124,31 @@ pub fn start_daemon() -> Result<()> {
     Ok(())
 }
 
+/// Copy until EOF, flushing after every chunk. (Plain reads and writes on purpose: on Linux
+/// `io::copy` turns pipe/socket pairs into `splice` calls, which can hold data back.)
+fn relay(from: &mut impl Read, to: &mut impl Write) {
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() || to.flush().is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 fn pipe(stream: UnixStream, mut from_daemon: BufReader<UnixStream>) -> Result<()> {
     let mut to_daemon = stream;
     std::thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut to_daemon);
+        relay(&mut io::stdin().lock(), &mut to_daemon);
         let _ = to_daemon.shutdown(Shutdown::Write);
     });
-    let mut out = io::stdout().lock();
-    let _ = io::copy(&mut from_daemon, &mut out);
-    let _ = out.flush();
+    relay(&mut from_daemon, &mut io::stdout().lock());
     // The stdin thread may still be blocked on a read; we're done either way.
     std::process::exit(0);
 }
