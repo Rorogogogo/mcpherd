@@ -85,7 +85,8 @@ fn normalize_argv(argv: Vec<String>) -> Vec<String> {
 fn is_ignored(p: &Proc) -> bool {
     matches!(
         p.name.as_str(),
-        "zsh" | "bash" | "sh" | "fish" | "caffeinate"
+        // `mcpherd` here is a stub: the real server runs under the daemon.
+        "zsh" | "bash" | "sh" | "fish" | "caffeinate" | "mcpherd"
     )
 }
 
@@ -96,6 +97,8 @@ fn agent_of(p: &Proc) -> Option<&'static str> {
         // The desktop app's main process launches its extensions' MCP servers.
         "Claude" => Some("claude-desktop"),
         "codex" if !p.argv.iter().any(|a| a == "mcp-server") => Some("codex"),
+        // The daemon holds every shared server, so it reads like one more session.
+        "mcpherd" if p.argv.get(1).is_some_and(|a| a == "daemon") => Some("mcpherd"),
         _ => None,
     }
 }
@@ -220,7 +223,7 @@ pub fn findings(sessions: &[Session]) -> Vec<Finding> {
 
     for session in sessions {
         let held: u64 = session.servers.iter().map(|s| s.rss_bytes).sum();
-        if session.age_secs >= OLD_SESSION_SECS && held > 0 {
+        if session.agent != "mcpherd" && session.age_secs >= OLD_SESSION_SECS && held > 0 {
             out.push(Finding {
                 severity: Severity::Info,
                 code: "old-session",
@@ -235,6 +238,19 @@ pub fn findings(sessions: &[Session]) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Resident memory of a process and everything under it.
+pub fn tree_rss(procs: &[Proc], pid: u32) -> u64 {
+    let mut children: HashMap<u32, Vec<&Proc>> = HashMap::new();
+    for p in procs {
+        if let Some(parent) = p.parent {
+            children.entry(parent).or_default().push(p);
+        }
+    }
+    let kids = |pid: u32| children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
+    let own = procs.iter().find(|p| p.pid == pid).map_or(0, |p| p.rss);
+    subtree(pid, own, &kids).0
 }
 
 fn subtree<'a>(pid: u32, rss: u64, kids: &impl Fn(u32) -> &'a [&'a Proc]) -> (u64, usize) {
@@ -341,6 +357,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
             },
+            shared_via: None,
         }];
 
         let found = sessions(&procs, &servers);

@@ -25,7 +25,7 @@ easily adds up to a gigabyte or more. Sessions you forgot about keep their serve
 days. And your config files slowly collect copy-pasted entries, dead projects and API keys sitting
 in plain text.
 
-**mcpherd shows you all of it in one command.** Later releases will fix it too.
+**mcpherd shows you all of it in one command, and fixes the duplicates with one more:** `mcpherd share` makes every session use one copy of each server.
 
 ---
 
@@ -37,7 +37,9 @@ in plain text.
 - 🔑 **Catch leaked secrets.** Finds API keys in command lines, where any process can read them with `ps`, and plain-text keys in `env`.
 - 🪦 **Find dead config.** Flags entries for deleted project folders and commands or scripts that no longer exist.
 - 🕰️ **Find forgotten sessions.** Points out sessions that have run for days and still hold servers.
-- 🙈 **Safe to share.** Secrets are always masked, and it never changes anything.
+- 🐑 **One copy for every session.** `mcpherd share` routes your servers through a small daemon, so ten sessions use one copy instead of ten. It works with any stdio server, including ones you only have as a binary.
+- ↩️ **Easy to undo.** `share` backs up every file it touches and `mcpherd unshare` puts each entry back exactly as it was.
+- 🙈 **Safe by default.** Secrets are always masked, `doctor` never changes anything, and `share` leaves servers with per-session state alone.
 - ⚡ **Tiny and fast.** A single ~2 MB native binary with no runtime to install.
 
 ---
@@ -103,6 +105,16 @@ mcpherd doctor
 
 That's it. It finishes in a fraction of a second and only reads your configs and process list. Nothing is changed.
 
+If it shows duplicate servers, share them:
+
+```sh
+mcpherd share --dry-run   # see the plan
+mcpherd share             # apply it (asks first, backs everything up)
+```
+
+New sessions now share one copy of each server. Sessions that are already open keep their own
+copies until you restart them.
+
 ---
 
 ## 📖 Usage
@@ -113,7 +125,51 @@ That's it. It finishes in a fraction of a second and only reads your configs and
 |---|---|
 | `mcpherd doctor` | Prints a readable report of your configured servers, running sessions and findings |
 | `mcpherd doctor --json` | Prints the same report as JSON, for scripts or other tools |
+| `mcpherd share` | Rewrites your configs so all sessions share one copy of each server. Asks first and backs up each file |
+| `mcpherd share context7 postgres` | Shares only the servers you name |
+| `mcpherd share --exclude jobs` | Shares everything that is safe to share except `jobs` |
+| `mcpherd share --dry-run` | Shows what would change without changing anything |
+| `mcpherd unshare` | Puts every shared entry back the way it was (or name the ones to restore) |
+| `mcpherd status` | Lists the shared servers, how many sessions use each one, and their memory |
+| `mcpherd stop` | Stops the daemon and its servers. They start again when a session needs them |
 | `mcpherd --version` | Prints the version |
+
+### How sharing works
+
+`mcpherd share` makes one small change to each entry: the command becomes `mcpherd proxy`, with
+the original command kept after `--`.
+
+```text
+before  "command": "npx", "args": ["-y", "@upstash/context7-mcp"]
+after   "command": "/Users/you/.cargo/bin/mcpherd",
+        "args": ["proxy", "--name", "context7", "--", "npx", "-y", "@upstash/context7-mcp"]
+```
+
+When a session starts that entry, the stub connects to the mcpherd daemon (starting it if
+needed). The daemon runs **one** copy of the server and routes every session's messages to it:
+
+- request ids, progress updates and cancellations are rewritten, so sessions never see each
+  other's traffic;
+- the server's handshake runs once, and later sessions get the same answer instantly;
+- a server stops 5 minutes after its last session closes, so nothing is left running;
+- if the daemon can't be reached, the stub runs the server directly, so a session never breaks.
+  Set `MCPHERD_DIRECT=1` to always do that.
+
+Sessions share a server only when they would start it the same way: same command, same
+arguments and the same values for the variables in its `env`. Two Claude Code sessions, or a
+Claude Code and a Codex session, with the same setup share one copy.
+
+**What `share` leaves alone by default:**
+
+| Skipped | Why |
+|---|---|
+| Servers that drive a browser, REPLs, `codex mcp-server` | They keep per-session state, so sessions would interfere |
+| Entries in a project's `.mcp.json` | That file is usually committed, and would get your local path |
+| Plugin servers | Their files belong to the plugin and are replaced on update |
+| Remote (HTTP) servers and entries for deleted projects | Nothing to share |
+
+Name a server explicitly (`mcpherd share playwright`) to share it anyway. Servers that read
+relative paths are shared only between sessions in the same folder.
 
 ### Reading the report
 
@@ -133,12 +189,13 @@ The report has three parts:
 | `missing-command` | The server's program can't be found, so it will never start | Install it, fix the path or remove the entry |
 | `missing-script` | The script the server runs (`.js`, `.py`, …) doesn't exist | Fix the path or remove the entry |
 | `shell-command` | A whole shell line was put in `command` (e.g. `FOO=1 npx thing`) | Split it into `command`, `args` and `env` |
-| `duplicate-processes` | Several copies of the same server are running | Close unused sessions; sharing is coming in a later release |
+| `duplicate-processes` | Several copies of the same server are running | Run `mcpherd share` |
 | `old-session` | A session has run for days and still holds servers | Close it if you're done with it |
 | `redundant-project-entry` | A project repeats a server that's already defined for your user | Remove the project copy |
 | `repeated-project-entry` | Several projects each define the same server | Define it once at user level |
-| `cross-agent` | The same server is set up in more than one agent | Nothing yet. It's a candidate for sharing later |
+| `cross-agent` | The same server is set up in more than one agent | `mcpherd share` lets both agents use one copy |
 | `npx-wrapper` | The server starts through `npx`, which keeps an extra process alive in every session | Install the package globally and point `command` at it |
+| `missing-mcpherd` | A shared entry points at an mcpherd binary that no longer exists | Reinstall mcpherd or run `mcpherd unshare` |
 
 ### Where it looks
 
@@ -165,27 +222,27 @@ src/
 ├── signature.rs   works out when two entries or processes are "the same server"
 ├── lint.rs        config checks (secrets, dead entries, duplicates)
 ├── secrets.rs     secret detection and masking
-└── report.rs      text and JSON output
+├── report.rs      text and JSON output
+├── share.rs       the config rewrite behind `share` / `unshare`
+├── wrap.rs        the stub command line, and how to undo it
+├── proxy.rs       the stub each session starts
+├── daemon.rs      runs one copy of each server and the sessions attached to it
+└── router.rs      rewrites JSON-RPC ids, tokens and the handshake between sessions
 ```
 
 ### Roadmap
 
-`doctor` finds the problem. The next releases fix it, without asking users to do anything extra:
-
-1. ✅ **`doctor`**: a read-only audit (available now)
-2. 🔜 **Stub + daemon**: servers start only when first used, stop when idle and never get left behind
-3. 🔜 **`adopt` / `restore`**: a one-time automatic config rewrite, with a diff and a backup, that can be undone
-4. 🔜 **Sharing**: one copy of each stateless server for all your sessions, even across Claude Code, Codex and Cursor
+1. ✅ **`doctor`**: a read-only audit
+2. ✅ **`share` / `unshare`**: one copy of each server for all sessions, through a stub and a daemon, with a one-time config rewrite that can be undone
+3. 🔜 **Claude Desktop configs** and plugin servers
+4. 🔜 **Per-session state** for servers that need it, so browser servers can be shared safely too
 
 ```text
-Today                                With mcpherd sharing
+Before                               After mcpherd share
 session 1 ──▶ context7               session 1 ──┐
 session 2 ──▶ context7               session 2 ──┼──▶ mcpherd ──▶ context7 (one copy)
 session 3 ──▶ context7               session 3 ──┘
 ```
-
-Servers that keep per-session state, such as one that drives a browser, will keep running one copy
-per session, so sessions never interfere with each other.
 
 ---
 
