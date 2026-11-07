@@ -2,7 +2,9 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -12,7 +14,22 @@ const BIN: &str = env!("CARGO_BIN_EXE_mcpherd");
 struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    lines: mpsc::Receiver<String>,
+    home: PathBuf,
+}
+
+/// Everything the daemon and servers logged, to explain a failure.
+fn logs(home: &Path) -> String {
+    let mut out = String::new();
+    let mut files = vec![home.join("daemon.log")];
+    if let Ok(dir) = std::fs::read_dir(home.join("logs")) {
+        files.extend(dir.flatten().map(|e| e.path()));
+    }
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        out.push_str(&format!("--- {}\n{text}", f.display()));
+    }
+    out
 }
 
 impl Session {
@@ -29,10 +46,20 @@ impl Session {
         let mut child = cmd.spawn().unwrap();
         let stdin = child.stdin.take();
         let stdout = BufReader::new(child.stdout.take().unwrap());
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in stdout.lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Session {
             child,
             stdin,
-            stdout,
+            lines,
+            home: home.to_path_buf(),
         }
     }
 
@@ -43,10 +70,13 @@ impl Session {
     }
 
     fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
-        assert!(!line.is_empty(), "session closed unexpectedly");
-        serde_json::from_str(&line).unwrap()
+        match self.lines.recv_timeout(Duration::from_secs(15)) {
+            Ok(line) => serde_json::from_str(&line).unwrap(),
+            Err(e) => panic!(
+                "no message from the session ({e}); logs:\n{}",
+                logs(&self.home)
+            ),
+        }
     }
 
     /// Run the handshake and return the server's answer.
