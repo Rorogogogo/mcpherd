@@ -18,7 +18,22 @@ pub fn load_all(home: &Path) -> Loaded {
     load_claude(home, &mut loaded);
     load_codex(home, &mut loaded);
     load_cursor(home, &mut loaded);
+    for server in &mut loaded.servers {
+        unwrap_shared(server);
+    }
     loaded
+}
+
+/// Describe a shared entry by the server it runs, not by the stub.
+fn unwrap_shared(server: &mut Server) {
+    let Transport::Stdio { command, args, .. } = &mut server.transport else {
+        return;
+    };
+    if let Some(w) = crate::wrap::unwrap(command, args) {
+        *command = w.command;
+        *args = w.args;
+        server.shared_via = Some(w.wrapper);
+    }
 }
 
 fn read_json(path: &Path, loaded: &mut Loaded) -> Option<Json> {
@@ -173,6 +188,7 @@ fn load_codex(home: &Path, loaded: &mut Loaded) {
             name: name.clone(),
             source: path.clone(),
             transport,
+            shared_via: None,
         });
     }
 }
@@ -187,6 +203,7 @@ fn push_json_servers(map: &Json, agent: Agent, scope: Scope, source: &Path, load
                 name: name.clone(),
                 source: source.to_path_buf(),
                 transport,
+                shared_via: None,
             });
         }
     }

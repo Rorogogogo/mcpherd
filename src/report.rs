@@ -51,7 +51,11 @@ pub fn render(r: &Report) -> String {
             s.agent.label(),
             shorten(&s.name, 24),
             shorten(&s.scope.label(), 34),
-            shorten(&s.launch_line(), 60)
+            if s.shared_via.is_some() {
+                format!("[shared] {}", shorten(&s.launch_line(), 51))
+            } else {
+                shorten(&s.launch_line(), 60)
+            }
         );
     }
 

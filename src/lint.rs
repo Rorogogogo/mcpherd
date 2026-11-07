@@ -91,6 +91,20 @@ fn lint_server(server: &Server, path_var: Option<&OsStr>, home: &Path, out: &mut
         return;
     }
 
+    if let Some(wrapper) = &server.shared_via
+        && !Path::new(wrapper).exists()
+    {
+        out.push(Finding {
+            severity: Severity::Error,
+            code: "missing-mcpherd",
+            subject: subject(server),
+            message: format!(
+                "this entry is shared through {wrapper}, which no longer exists, so it can't start"
+            ),
+            fix: Some("reinstall mcpherd, or restore the entry with `mcpherd unshare`".into()),
+        });
+    }
+
     if command.contains("${") {
         return;
     }
@@ -176,7 +190,7 @@ pub fn program_of(command: &str) -> &str {
         .unwrap_or(command)
 }
 
-fn is_script(arg: &str) -> bool {
+pub fn is_script(arg: &str) -> bool {
     [".js", ".mjs", ".cjs", ".ts", ".py"]
         .iter()
         .any(|ext| arg.ends_with(ext))
@@ -308,6 +322,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
             },
+            shared_via: None,
         }
     }
 

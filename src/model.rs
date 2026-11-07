@@ -64,6 +64,10 @@ pub struct Server {
     pub source: PathBuf,
     #[serde(flatten)]
     pub transport: Transport,
+    /// Set when `mcpherd share` routed this entry through the daemon: the mcpherd binary the
+    /// entry runs. `transport` always describes the real server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_via: Option<String>,
 }
 
 impl Server {
