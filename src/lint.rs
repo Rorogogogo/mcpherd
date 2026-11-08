@@ -26,7 +26,7 @@ pub struct Finding {
     pub fix: Option<String>,
 }
 
-fn subject(s: &Server) -> String {
+pub(crate) fn subject(s: &Server) -> String {
     format!("{} · {} ({})", s.agent.label(), s.name, s.scope.label())
 }
 

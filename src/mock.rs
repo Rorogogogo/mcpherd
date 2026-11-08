@@ -1,5 +1,6 @@
 //! A tiny MCP server for tests (`mcpherd mock-server`, hidden). Its one tool reports the
 //! server's pid and how many calls it has handled, which shows whether sessions share it.
+//! With `{"sleep_ms": n}` it takes that long to answer, so tests can catch a call in flight.
 
 use std::io::{self, BufRead, Write};
 
@@ -28,6 +29,12 @@ pub fn run() {
             }
             "tools/call" => {
                 calls += 1;
+                if let Some(ms) = msg
+                    .pointer("/params/arguments/sleep_ms")
+                    .and_then(Value::as_u64)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
                 if let Some(token) = msg.pointer("/params/_meta/progressToken") {
                     let note = json!({"jsonrpc": "2.0", "method": "notifications/progress",
                         "params": {"progressToken": token, "progress": 1, "total": 1}});

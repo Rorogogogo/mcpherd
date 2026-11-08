@@ -127,11 +127,11 @@ copies until you restart them.
 | `mcpherd doctor --json` | Prints the same report as JSON, for scripts or other tools |
 | `mcpherd share` | Rewrites your configs so all sessions share one copy of each server. Asks first and backs up each file |
 | `mcpherd share context7 postgres` | Shares only the servers you name |
-| `mcpherd share --exclude jobs` | Shares everything that is safe to share except `jobs` |
+| `mcpherd share --exclude jobs` | Shares everything that is safe to share except `jobs`, and remembers to leave `jobs` alone next time |
 | `mcpherd share --dry-run` | Shows what would change without changing anything |
 | `mcpherd unshare` | Puts every shared entry back the way it was (or name the ones to restore) |
 | `mcpherd status` | Lists the shared servers, how many sessions use each one, and their memory |
-| `mcpherd stop` | Stops the daemon and its servers. They start again when a session needs them |
+| `mcpherd stop` | Stops the daemon and its servers. Open sessions reconnect to a fresh one the next time they use a server |
 | `mcpherd --version` | Prints the version |
 
 ### How sharing works
@@ -153,7 +153,11 @@ needed). The daemon runs **one** copy of the server and routes every session's m
 - the server's handshake runs once, and later sessions get the same answer instantly;
 - a server stops 5 minutes after its last session closes, so nothing is left running;
 - if the daemon can't be reached, the stub runs the server directly, so a session never breaks.
-  Set `MCPHERD_DIRECT=1` to always do that.
+  Set `MCPHERD_DIRECT=1` to always do that;
+- if a shared server or the daemon goes away mid-session, each stub reconnects on its own the
+  next time its session needs the server. A call that was running at that moment returns an
+  error; the session's handshake is replayed to the new server, so the agent carries on as if
+  nothing happened. If the daemon can't come back, the stub runs the server itself.
 
 Sessions share a server only when they would start it the same way: same command, same
 arguments and the same values for the variables in its `env`. Two Claude Code sessions, or a
@@ -170,6 +174,12 @@ Claude Code and a Codex session, with the same setup share one copy.
 
 Name a server explicitly (`mcpherd share playwright`) to share it anyway. Servers that read
 relative paths are shared only between sessions in the same folder.
+
+**Adding servers later.** `share` changes your configs once; it doesn't watch them. A server you
+add afterwards runs one copy per session until you run `mcpherd share` again. Already shared
+entries are skipped, and `mcpherd doctor` lists the ones that aren't shared yet (`not-shared`).
+Servers you excluded are remembered in `~/.mcpherd/config.toml`, so a plain `mcpherd share`
+keeps leaving them alone; name one to share it after all.
 
 ### Reading the report
 
@@ -196,6 +206,7 @@ The report has three parts:
 | `cross-agent` | The same server is set up in more than one agent | `mcpherd share` lets both agents use one copy |
 | `npx-wrapper` | The server starts through `npx`, which keeps an extra process alive in every session | Install the package globally and point `command` at it |
 | `missing-mcpherd` | A shared entry points at an mcpherd binary that no longer exists | Reinstall mcpherd or run `mcpherd unshare` |
+| `not-shared` | You use sharing, but this server still starts a copy in every session (usually added later) | Run `mcpherd share NAME`, or `--exclude NAME` to keep it per session |
 
 ### Where it looks
 
@@ -225,7 +236,7 @@ src/
 ├── report.rs      text and JSON output
 ├── share.rs       the config rewrite behind `share` / `unshare`
 ├── wrap.rs        the stub command line, and how to undo it
-├── proxy.rs       the stub each session starts
+├── proxy.rs       the stub each session starts, and its reconnects
 ├── daemon.rs      runs one copy of each server and the sessions attached to it
 └── router.rs      rewrites JSON-RPC ids, tokens and the handshake between sessions
 ```
