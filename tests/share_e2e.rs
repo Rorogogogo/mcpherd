@@ -173,10 +173,74 @@ fn sessions_share_one_server() {
     assert_ne!(direct_pid, pid_a);
     direct.close();
 
-    // Stopping the daemon ends the remaining session, like a server exiting would.
+    // Stopping the daemon doesn't end the remaining session, and nothing comes back until it's
+    // used again.
     assert!(mcpherd(h, &["stop"]).contains("Stopped"));
-    wait_exit(&mut b.child);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(b.child.try_wait().unwrap().is_none(), "session ended");
     assert!(mcpherd(h, &["status"]).contains("not running"));
+    let (fresh, calls) = b.whoami(3);
+    assert_ne!(fresh, pid_a);
+    assert_eq!(calls, 1);
+    b.close();
+    mcpherd(h, &["stop"]);
+}
+
+fn kill(pid: &str) {
+    assert!(
+        Command::new("kill")
+            .args(["-9", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn sessions_survive_a_server_crash() {
+    let home = tempfile::Builder::new()
+        .prefix("mh")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let h = home.path();
+
+    let mut a = Session::start(h, &[]);
+    let mut b = Session::start(h, &[]);
+    a.initialize();
+    b.initialize();
+    let (first, _) = a.whoami(1);
+    assert_eq!(b.whoami(1).0, first);
+
+    // A slow call is in flight when the server dies: it fails, cleanly, with its own id.
+    a.send(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "whoami", "arguments": {"sleep_ms": 5000}}}));
+    std::thread::sleep(Duration::from_millis(300));
+    kill(&first);
+    let failed = a.recv();
+    assert_eq!(failed["id"], json!(5));
+    assert_eq!(failed["error"]["code"], json!(-32603));
+
+    // Both sessions carry on, now on one fresh server, without a new handshake from the agent.
+    let (second, calls) = b.whoami(2);
+    assert_ne!(second, first);
+    assert_eq!(calls, 1);
+    assert_eq!(a.whoami(6), (second.clone(), 2));
+    let status: Value = serde_json::from_str(&mcpherd(h, &["status", "--json"])).unwrap();
+    assert_eq!(status["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(status["servers"][0]["sessions"], 2);
+
+    // If the daemon can't come back at all, the session runs the server itself.
+    mcpherd(h, &["stop"]);
+    let mode = std::fs::metadata(h).unwrap().permissions();
+    std::fs::set_permissions(h, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let (direct, calls) = a.whoami(7);
+    std::fs::set_permissions(h, mode).unwrap();
+    assert_ne!(direct, second);
+    assert_eq!(calls, 1);
+
+    a.close();
+    b.close();
+    mcpherd(h, &["stop"]);
 }
 
 #[test]

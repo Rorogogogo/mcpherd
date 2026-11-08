@@ -42,3 +42,23 @@ jobs:
       - run: gh release upload "$GITHUB_REF_NAME" mcpherd-${{ matrix.target }}.tar.gz*
         env:
           GH_TOKEN: ${{ github.token }}
+
+  crates-io:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+      # Trusted publishing: crates.io trusts this workflow, so no long-lived token is stored.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

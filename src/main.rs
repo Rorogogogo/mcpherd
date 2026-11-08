@@ -41,7 +41,7 @@ enum Command {
     Share {
         /// Only these servers (default: every server that is safe to share)
         names: Vec<String>,
-        /// Leave these servers alone
+        /// Leave these servers alone, now and in later runs (naming one shares it again)
         #[arg(long, value_name = "NAME")]
         exclude: Vec<String>,
         /// Show what would change without changing anything
@@ -163,6 +163,10 @@ fn doctor(json: bool) -> Result<()> {
 
     let path = env::var_os("PATH");
     let mut findings = lint::lint(&loaded.servers, path.as_deref(), &home);
+    findings.extend(share::findings(
+        &loaded.servers,
+        &share::remembered_excludes(),
+    ));
     findings.extend(procs::findings(&sessions));
     findings.sort_by_key(|f| f.severity);
 
@@ -259,7 +263,10 @@ fn stop() -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            println!("Stopped the mcpherd daemon and its servers.");
+            println!(
+                "Stopped the mcpherd daemon and its servers. Sessions that are still open \
+                 reconnect to a fresh one the next time they use a shared server."
+            );
         }
         Err(_) => println!("The mcpherd daemon is not running."),
     }

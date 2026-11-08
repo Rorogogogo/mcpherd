@@ -14,7 +14,7 @@ use serde_json::Value as Json;
 
 use crate::config;
 use crate::daemon;
-use crate::lint;
+use crate::lint::{self, Finding, Severity};
 use crate::model::{Agent, Scope, Server, Transport};
 use crate::signature;
 use crate::wrap;
@@ -119,6 +119,87 @@ fn exe_path() -> Result<String> {
     Ok(text.to_string())
 }
 
+/// Where `share` remembers what to leave alone.
+fn settings_path() -> PathBuf {
+    daemon::dir().join("config.toml")
+}
+
+/// Servers `share` was told to leave alone in earlier runs.
+pub fn remembered_excludes() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(settings_path()) else {
+        return Vec::new();
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    doc.get("exclude")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_excludes(names: &[String]) -> Result<()> {
+    let path = settings_path();
+    let list: toml_edit::Array = names.iter().map(String::as_str).collect();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut doc: toml_edit::DocumentMut = text
+                .parse()
+                .with_context(|| format!("reading {}", path.display()))?;
+            doc["exclude"] = toml_edit::value(list);
+            doc.to_string()
+        }
+        Err(_) => format!(
+            "# mcpherd settings\n\n# Servers `mcpherd share` leaves alone. Name one (`mcpherd share NAME`) to share it again.\nexclude = {list}\n"
+        ),
+    };
+    daemon::ensure_dir()?;
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The exclusions for this run: remembered ones, minus servers named on purpose, plus new ones.
+fn excludes_for(remembered: &[String], opts: &Options) -> Vec<String> {
+    let mut out: Vec<String> = remembered
+        .iter()
+        .filter(|n| !opts.names.contains(n))
+        .cloned()
+        .collect();
+    for n in &opts.exclude {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
+/// Doctor findings: once sharing is in use, servers that would be shared but aren't (usually
+/// ones added after `mcpherd share` ran).
+pub fn findings(servers: &[Server], excludes: &[String]) -> Vec<Finding> {
+    if !servers.iter().any(|s| s.shared_via.is_some()) {
+        return Vec::new();
+    }
+    plan(servers, &[], excludes, false)
+        .into_iter()
+        .filter(|(_, d)| matches!(d, Decision::Share { .. }))
+        .map(|(i, _)| Finding {
+            severity: Severity::Info,
+            code: "not-shared",
+            subject: lint::subject(&servers[i]),
+            message: "starts a separate copy in every session; it was probably added after you \
+                      ran `mcpherd share`"
+                .into(),
+            fix: Some(format!(
+                "`mcpherd share {}` (or `--exclude {}` to keep it per session)",
+                servers[i].name, servers[i].name
+            )),
+        })
+        .collect()
+}
+
 pub fn run(home: &Path, opts: &Options, undo: bool) -> Result<()> {
     let loaded = config::load_all(home);
     let servers = &loaded.servers;
@@ -127,7 +208,32 @@ pub fn run(home: &Path, opts: &Options, undo: bool) -> Result<()> {
             bail!("no MCP server named `{name}` in any config");
         }
     }
-    let decisions = plan(servers, &opts.names, &opts.exclude, undo);
+    let remembered = remembered_excludes();
+    let exclude = if undo {
+        Vec::new()
+    } else {
+        excludes_for(&remembered, opts)
+    };
+    let decisions = plan(servers, &opts.names, &exclude, undo);
+    let remember = || -> Result<()> {
+        if undo || opts.dry_run || exclude == remembered {
+            return Ok(());
+        }
+        save_excludes(&exclude)?;
+        if exclude.is_empty() {
+            println!(
+                "No servers are excluded any more ({}).",
+                settings_path().display()
+            );
+        } else {
+            println!(
+                "Remembered: `mcpherd share` will keep leaving {} alone (edit {} to change).",
+                exclude.join(", "),
+                settings_path().display()
+            );
+        }
+        Ok(())
+    };
     let exe = exe_path()?;
 
     let todo: Vec<&(usize, Decision)> = decisions
@@ -160,7 +266,7 @@ pub fn run(home: &Path, opts: &Options, undo: bool) -> Result<()> {
     }
     if todo.is_empty() {
         println!("\nNothing to change.");
-        return Ok(());
+        return remember();
     }
 
     let files: BTreeMap<&PathBuf, usize> = todo.iter().fold(BTreeMap::new(), |mut m, (i, _)| {
@@ -207,6 +313,7 @@ pub fn run(home: &Path, opts: &Options, undo: bool) -> Result<()> {
             return Ok(());
         }
     }
+    remember()?;
 
     for file in files.keys() {
         let entries: Vec<(&Server, &Decision)> = todo
@@ -396,6 +503,61 @@ mod tests {
         // Naming a browser server shares it anyway.
         let d = plan(&servers, &["pw".into()], &[], false);
         assert_eq!(d, [(1, Decision::Share { project: false })]);
+    }
+
+    #[test]
+    fn remembers_exclusions_until_named() {
+        let opts = |names: &[&str], exclude: &[&str]| Options {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+            dry_run: false,
+            yes: true,
+        };
+        let saved = vec!["jobjourney".to_string(), "nomoreide".to_string()];
+        assert_eq!(excludes_for(&saved, &opts(&[], &[])), saved);
+        assert_eq!(
+            excludes_for(&saved, &opts(&[], &["pw", "nomoreide"])),
+            ["jobjourney", "nomoreide", "pw"]
+        );
+        // Naming a server is how you share it again.
+        assert_eq!(
+            excludes_for(&saved, &opts(&["jobjourney"], &[])),
+            ["nomoreide"]
+        );
+    }
+
+    #[test]
+    fn doctor_points_out_servers_added_after_sharing() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let config = |servers: serde_json::Value| {
+            write(
+                &h.join(".claude.json"),
+                &serde_json::json!({"mcpServers": servers}).to_string(),
+            );
+            config::load_all(h).servers
+        };
+        let plain = serde_json::json!({
+            "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
+            "pg": {"command": "postgres-mcp"},
+            "jj": {"command": "npx", "args": ["-y", "jobjourney"]}
+        });
+        // Nobody uses sharing yet: no nagging.
+        assert!(findings(&config(plain), &[]).is_empty());
+
+        let mut mixed = serde_json::json!({
+            "context7": {"command": "/u/mcpherd", "args": ["proxy", "--name", "context7", "--", "npx", "-y", "@upstash/context7-mcp"]},
+            "pg": {"command": "postgres-mcp"},
+            "jj": {"command": "npx", "args": ["-y", "jobjourney"]},
+            "pw": {"command": "npx", "args": ["@playwright/mcp"]}
+        });
+        let servers = config(mixed.take());
+        let found: Vec<String> = findings(&servers, &["jj".into()])
+            .into_iter()
+            .map(|f| f.subject)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("pg"));
     }
 
     #[test]

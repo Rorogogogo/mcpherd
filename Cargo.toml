@@ -1,6 +1,6 @@
 [package]
 name = "mcpherd"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Keep MCP servers in check across coding agent sessions (Claude Code, Codex, Cursor)"
